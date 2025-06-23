@@ -14,14 +14,6 @@ load_dotenv()
 
 # Get database credentials from environment variables or Streamlit secrets
 try:
-    # Try Streamlit secrets first (for deployment)
-    DB_USER = st.secrets["DB_USER"]
-    DB_PASSWORD = st.secrets["DB_PASSWORD"]
-    DB_HOST = st.secrets["DB_HOST"]
-    DB_PORT = st.secrets["DB_PORT"]
-    DB_NAME = st.secrets["DB_NAME"]
-    OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
-except:
     # Fallback to environment variables (for local development)
     DB_USER = os.getenv("DB_USER")
     DB_PASSWORD = os.getenv("DB_PASSWORD")
@@ -29,6 +21,11 @@ except:
     DB_PORT = os.getenv("DB_PORT")
     DB_NAME = os.getenv("DB_NAME")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+except Exception as e:
+    st.error(f"❌ Failed to load environment variables: {str(e)}")
+    st.stop()
+
+
 
 # Validate that all required credentials are available
 if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME]):
@@ -163,9 +160,22 @@ if page == "💸 Spending Feature":
                 FROM new_users u
                 LEFT JOIN budget_acts b ON u.user_id = b.user_id
                 LEFT JOIN transaction_acts t ON u.user_id = t.user_id
+            ),
+            spending_events AS (
+                SELECT user_id, COUNT(*) as usage_count, COUNT(DISTINCT DATE(updated_at)) as unique_usage_days
+                FROM (
+                    SELECT user_id, created_at as updated_at FROM budgets
+                    UNION ALL
+                    SELECT user_id, updated_at FROM manual_and_external_transactions
+                ) all_spending
+                GROUP BY user_id
             )
-            SELECT *
-            FROM combined
+            SELECT c.*, 
+                s.usage_count, 
+                s.unique_usage_days, 
+                EXTRACT(DAY FROM CURRENT_DATE - c.created_at)::int + 1 AS days_since_signup
+            FROM combined c
+            LEFT JOIN spending_events s ON c.user_id = s.user_id
             ORDER BY interacted_with_spending_feature DESC;
             """
             df = pd.read_sql(query, engine)
@@ -175,6 +185,17 @@ if page == "💸 Spending Feature":
             return pd.DataFrame(columns=['user_id', 'customer_name', 'email', 'created_at', 
                                        'last_budget_time', 'last_transaction_time', 
                                        'spending_feature_used', 'interacted_with_spending_feature'])
+
+    # --- CLASSIFY REPEAT USAGE ---
+    def classify_repeat_usage(row):
+        if row['unique_usage_days'] == 1:
+            return "One-Time User" 
+        elif row['unique_usage_days'] >= row['days_since_signup']:
+            return "Daily User"
+        elif row['unique_usage_days'] >= 2:
+            return "Regular User"
+        else:
+            return "No User Interaction"
 
     # Get date range and total users
     with st.spinner("Getting database information..."):
@@ -207,6 +228,8 @@ if page == "💸 Spending Feature":
         st.warning("⚠️ No data available for the selected date range. Please try a different date range.")
     else:
         df['created_at'] = pd.to_datetime(df['created_at'])
+        # Add usage_type column after df is loaded and not empty
+        df['usage_type'] = df.apply(classify_repeat_usage, axis=1)
     
     # Warn if today is selected but no users actually signed up today
     today = datetime.today().date()
@@ -215,8 +238,6 @@ if page == "💸 Spending Feature":
 
         # Ensure the column has clean string values
     df["interacted_with_spending_feature"] = df["interacted_with_spending_feature"].astype(str).str.strip().str.capitalize()
-
-    # Sidebar filter
     interaction_filter = st.sidebar.selectbox(
         "Interaction", 
         ["All"] + sorted(df["interacted_with_spending_feature"].dropna().unique().tolist())
@@ -265,6 +286,17 @@ if page == "💸 Spending Feature":
             value=f"{no_interaction:,}",
             delta=f"{(no_interaction/total_new_users*100):.1f}%" if total_new_users > 0 else "0%",
             help="Users who haven't used spending features yet"
+        )
+
+    # --- AVERAGE USAGE METRICS ---
+    if not df.empty:
+        avg_usage_interacted = df[df["interacted_with_spending_feature"] == "Yes"]['unique_usage_days'].mean()
+
+        st.subheader("📊 Average Usage Metrics")
+        st.metric(
+            label="📅 Avg. Days Active (Interacted Users)",
+            value=f"{avg_usage_interacted:.1f}",
+            help="Average number of unique days users interacted with the spending feature"
         )
 
     # --- TIME-SERIES CHART ---
@@ -323,16 +355,53 @@ if page == "💸 Spending Feature":
     feature_counts = df["spending_feature_used"].value_counts().reset_index()
     feature_counts.columns = ["Feature Type", "User Count"]
 
-    fig_breakdown = px.pie(
-        feature_counts, 
-        values='User Count', 
-        names='Feature Type',
-        title='Distribution of Spending Feature Usage',
-        color_discrete_sequence=['#0039A6', '#1347AD', '#FFA500', '#FF6B6B']
-    )
+    col1, col2 = st.columns(2)
 
-    fig_breakdown.update_traces(textposition='inside', textinfo='percent+label')
-    st.plotly_chart(fig_breakdown, use_container_width=True)
+    with col1:
+        # Pie chart for feature usage breakdown
+        if feature_counts.empty:
+            st.warning("No feature usage data available.")
+        else:
+            fig_breakdown = px.pie(
+                feature_counts,
+                values='User Count',
+                names='Feature Type',
+                title='Distribution of Spending Feature Usage',
+                color_discrete_sequence=['#0039A6', '#1347AD', '#FFA500', '#FF6B6B']
+            )
+
+            fig_breakdown.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig_breakdown, use_container_width=True)
+
+    usage_summary = df['usage_type'].value_counts().reset_index()
+    usage_summary.columns = ['Usage Category', 'User Count']
+
+    # --- BAR CHART FOR SPENDING FEATURE REPEAT USAGE --
+    with col2:
+        st.subheader("📊 Spending Feature Repeat Usage")
+        if usage_summary.empty:
+            st.warning("No repeat usage data available.")
+        else:
+            usage_summary['Usage Category'] = usage_summary['Usage Category'].replace({
+                'One-Time User': 'One-time',
+                'Regular User': 'Regular user',
+                'Daily User': 'Daily'
+            })
+    
+        fig_bar = px.bar(
+            usage_summary,
+            x='Usage Category',
+            y='User Count',
+            color='Usage Category',
+            color_discrete_map={
+                'One-time': '#FF6B6B',
+                'Regular user': '#1347AD',
+                'Daily': "#4A6BAC"
+            },
+            title="Spending Feature Repeat Usage"
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
 
     # --- SUMMARY STATISTICS ---
     st.subheader("📊 Summary Statistics")
@@ -361,8 +430,13 @@ if page == "💸 Spending Feature":
 
     # --- TABLE VIEW ---
     st.subheader("📋 Detailed User Activity Table")
-    search_term = st.text_input("🔍 Search users (name or email):", placeholder="Enter name or email to search...")
 
+    search_term = st.text_input(
+        "🔍 Search users (name or email):",
+        placeholder="Enter name or email to search..."
+    )
+
+    # Filter by search
     if search_term:
         mask = (
             df['customer_name'].str.contains(search_term, case=False, na=False) |
@@ -373,7 +447,17 @@ if page == "💸 Spending Feature":
     else:
         filtered_df = df
 
-    st.dataframe(filtered_df, use_container_width=True)
+    st.dataframe(
+        filtered_df.style.format({
+            "usage_count": "{:.0f}",
+            "unique_usage_days": "{:.0f}",
+            "created_at": lambda x: x.strftime("%Y-%m-%d") if pd.notnull(x) else ""
+        }),
+        use_container_width=True
+    )
+
+    # Sort by unique usage days
+    filtered_df = filtered_df.sort_values(by='unique_usage_days', ascending=False)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("Built for Ladder ✨")
