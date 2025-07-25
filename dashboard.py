@@ -90,25 +90,27 @@ if page == "💸 Spending Feature":
     @st.cache_data
     def get_date_range():
         try:
-            query = "SELECT MIN(created_at) as min_date, MAX(created_at) as max_date FROM users"
-            date_range_df = pd.read_sql(query, engine)
-            min_date = pd.to_datetime(date_range_df['min_date'].iloc[0]).date()
-            db_max_date = pd.to_datetime(date_range_df['max_date'].iloc[0]).date()
-            today = datetime.today().date()
-            max_date = today  # Always allow today
-            return min_date, max_date, db_max_date
-        except Exception as e:
-            st.error(f"❌ Failed to get date range: {str(e)}")
-            today = datetime.today().date()
-            return datetime(2020, 1, 1).date(), today, today
+            with engine.connect() as conn:
+                query = "SELECT MIN(created_at) as min_date, MAX(created_at) as max_date FROM users"
+                date_range_df = pd.read_sql(query, conn)
+                min_date = pd.to_datetime(date_range_df['min_date'].iloc[0]).date()
+                db_max_date = pd.to_datetime(date_range_df['max_date'].iloc[0]).date()
+                today = datetime.today().date()
+                max_date = today  # Always allow today
+                return min_date, max_date, db_max_date
+            except Exception as e:
+                st.error(f"❌ Failed to get date range: {str(e)}")
+                today = datetime.today().date()
+                return datetime(2020, 1, 1).date(), today, today
 
     # --- GET TOTAL USER COUNT ---
     @st.cache_data
     def get_total_user_count():
         try:
-            query = "SELECT COUNT(*) as total_users FROM users"
-            total_users_df = pd.read_sql(query, engine)
-            return total_users_df['total_users'].iloc[0]
+            with engine.connect() as conn:
+                query = "SELECT COUNT(*) as total_users FROM users"
+                total_users_df = pd.read_sql(query, conn)
+                return total_users_df['total_users'].iloc[0]
         except Exception as e:
             st.error(f"❌ Failed to get total user count: {str(e)}")
             return 0
@@ -117,74 +119,75 @@ if page == "💸 Spending Feature":
     @st.cache_data
     def load_spending_data(start_date, end_date):
         try:
-            query = f"""
-            WITH new_users AS (
-                SELECT id AS user_id, first_name, last_name, email, created_at 
-                FROM users
-                WHERE created_at >= '{start_date}' AND created_at <= '{end_date}'
-            ),
-            budget_acts AS (
-                SELECT 
-                    b.user_id,
-                    MAX(b.created_at) AS last_budget_time
-                FROM budgets b
-                JOIN new_users u ON b.user_id = u.user_id
-                GROUP BY b.user_id
-            ),
-            transaction_acts AS (
-                SELECT 
-                    t.user_id,
-                    MAX(t.updated_at) AS last_transaction_time
-                FROM manual_and_external_transactions t
-                JOIN new_users u ON t.user_id = u.user_id
-                GROUP BY t.user_id
-            ),
-            combined AS (
-                SELECT 
-                    u.user_id,
-                    u.first_name || ' ' || u.last_name AS customer_name,
-                    u.email,
-                    u.created_at,
-                    COALESCE(b.last_budget_time, NULL) AS last_budget_time,
-                    COALESCE(t.last_transaction_time, NULL) AS last_transaction_time,
-                    CASE
-                        WHEN b.last_budget_time IS NOT NULL AND t.last_transaction_time IS NOT NULL THEN 'Budget + Transaction'
-                        WHEN b.last_budget_time IS NOT NULL THEN 'Budget'
-                        WHEN t.last_transaction_time IS NOT NULL THEN 'Transaction'
-                        ELSE 'None'
-                    END AS spending_feature_used,
-                    CASE
-                        WHEN b.last_budget_time IS NOT NULL OR t.last_transaction_time IS NOT NULL THEN 'Yes'
-                        ELSE 'No'
-                    END AS interacted_with_spending_feature
-                FROM new_users u
-                LEFT JOIN budget_acts b ON u.user_id = b.user_id
-                LEFT JOIN transaction_acts t ON u.user_id = t.user_id
-            ),
-            spending_events AS (
-                SELECT user_id, COUNT(*) as usage_count, COUNT(DISTINCT DATE(updated_at)) as unique_usage_days
-                FROM (
-                    SELECT user_id, created_at as updated_at FROM budgets
-                    UNION ALL
-                    SELECT user_id, updated_at FROM manual_and_external_transactions
-                ) all_spending
-                GROUP BY user_id
-            )
-            SELECT c.*, 
-                s.usage_count, 
-                s.unique_usage_days, 
-                EXTRACT(DAY FROM CURRENT_DATE - c.created_at)::int + 1 AS days_since_signup
-            FROM combined c
-            LEFT JOIN spending_events s ON c.user_id = s.user_id
-            ORDER BY interacted_with_spending_feature DESC;
-            """
-            df = pd.read_sql(query, engine)
-            return df
+            with engine.connect() as conn:
+                query = f"""
+                WITH new_users AS (
+                    SELECT id AS user_id, first_name, last_name, email, created_at 
+                    FROM users
+                    WHERE created_at >= '{start_date}' AND created_at <= '{end_date}'
+                ),
+                budget_acts AS (
+                    SELECT 
+                        b.user_id,
+                        MAX(b.created_at) AS last_budget_time
+                    FROM budgets b
+                    JOIN new_users u ON b.user_id = u.user_id
+                    GROUP BY b.user_id
+                ),
+                transaction_acts AS (
+                    SELECT 
+                        t.user_id,
+                        MAX(t.updated_at) AS last_transaction_time
+                    FROM manual_and_external_transactions t
+                    JOIN new_users u ON t.user_id = u.user_id
+                    GROUP BY t.user_id
+                ),
+                combined AS (
+                    SELECT 
+                        u.user_id,
+                        u.first_name || ' ' || u.last_name AS customer_name,
+                        u.email,
+                        u.created_at,
+                        COALESCE(b.last_budget_time, NULL) AS last_budget_time,
+                        COALESCE(t.last_transaction_time, NULL) AS last_transaction_time,
+                        CASE
+                            WHEN b.last_budget_time IS NOT NULL AND t.last_transaction_time IS NOT NULL THEN 'Budget + Transaction'
+                            WHEN b.last_budget_time IS NOT NULL THEN 'Budget'
+                            WHEN t.last_transaction_time IS NOT NULL THEN 'Transaction'
+                            ELSE 'None'
+                        END AS spending_feature_used,
+                        CASE
+                            WHEN b.last_budget_time IS NOT NULL OR t.last_transaction_time IS NOT NULL THEN 'Yes'
+                            ELSE 'No'
+                        END AS interacted_with_spending_feature
+                    FROM new_users u
+                    LEFT JOIN budget_acts b ON u.user_id = b.user_id
+                    LEFT JOIN transaction_acts t ON u.user_id = t.user_id
+                ),
+                spending_events AS (
+                    SELECT user_id, COUNT(*) as usage_count, COUNT(DISTINCT DATE(updated_at)) as unique_usage_days
+                    FROM (
+                        SELECT user_id, created_at as updated_at FROM budgets
+                        UNION ALL
+                        SELECT user_id, updated_at FROM manual_and_external_transactions
+                    ) all_spending
+                    GROUP BY user_id
+                )
+                SELECT c.*, 
+                    s.usage_count, 
+                    s.unique_usage_days, 
+                    EXTRACT(DAY FROM CURRENT_DATE - c.created_at)::int + 1 AS days_since_signup
+                FROM combined c
+                LEFT JOIN spending_events s ON c.user_id = s.user_id
+                ORDER BY interacted_with_spending_feature DESC;
+                """
+                df = pd.read_sql(query, conn)
+                return df
         except Exception as e:
             st.error(f"❌ Database query failed: {str(e)}")
             return pd.DataFrame(columns=['user_id', 'customer_name', 'email', 'created_at', 
-                                       'last_budget_time', 'last_transaction_time', 
-                                       'spending_feature_used', 'interacted_with_spending_feature'])
+                                        'last_budget_time', 'last_transaction_time', 
+                                        'spending_feature_used', 'interacted_with_spending_feature'])
 
     # --- CLASSIFY REPEAT USAGE ---
     def classify_repeat_usage(row):
