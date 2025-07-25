@@ -87,7 +87,7 @@ if page == "💸 Spending Feature":
     """)
 
     # --- GET DATE RANGE FOR FILTERS ---
-    @st.cache_data
+    @st.cache_data(ttl=300)
     def get_date_range():
         try:
             with engine.connect() as conn:
@@ -98,13 +98,13 @@ if page == "💸 Spending Feature":
                 today = datetime.today().date()
                 max_date = today  # Always allow today
                 return min_date, max_date, db_max_date
-            except Exception as e:
-                st.error(f"❌ Failed to get date range: {str(e)}")
-                today = datetime.today().date()
-                return datetime(2020, 1, 1).date(), today, today
+        except Exception as e:
+            st.error(f"❌ Failed to get date range: {str(e)}")
+            today = datetime.today().date()
+            return datetime(2020, 1, 1).date(), today, today
 
     # --- GET TOTAL USER COUNT ---
-    @st.cache_data
+    @st.cache_data(ttl=300)
     def get_total_user_count():
         try:
             with engine.connect() as conn:
@@ -116,7 +116,7 @@ if page == "💸 Spending Feature":
             return 0
     
     # --- DATA LOADING ---
-    @st.cache_data
+    @st.cache_data(ttl=300)
     def load_spending_data(start_date, end_date):
         try:
             with engine.connect() as conn:
